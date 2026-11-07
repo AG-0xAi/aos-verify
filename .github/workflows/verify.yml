@@ -1,0 +1,54 @@
+# Workflow reutilizable de AOS: mide aos/verify.json y pide el recibo firmado a aos-api.
+name: aos-verify
+on:
+  workflow_call:
+    inputs:
+      api-url:
+        required: true
+        type: string
+      audience:
+        required: true
+        type: string
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Traer el ejecutor de AOS (no el del repo del dev)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: AG-0xAi/aos-verify
+          ref: v1
+          path: .aos-verify
+          persist-credentials: false
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '24'
+      - name: Medir aos/verify.json
+        run: node "$GITHUB_WORKSPACE/.aos-verify/run-verify.mjs" --out "$RUNNER_TEMP/aos-verify-result.json"
+      - name: Pedir recibo
+        env:
+          API_URL: ${{ inputs.api-url }}
+          AUDIENCE: ${{ inputs.audience }}
+        run: |
+          set -euo pipefail
+          TOKEN=$(curl -sSf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$(node -e 'console.log(encodeURIComponent(process.env.AUDIENCE))')" | jq -r .value)
+          echo "::add-mask::$TOKEN"
+          CODE=$(curl -sS -o "$RUNNER_TEMP/receipt.json" -w '%{http_code}' -X POST "${API_URL%/}/v1/receipts" \
+            -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' --data @"$RUNNER_TEMP/aos-verify-result.json")
+          PASSED=$(jq -r .passed "$RUNNER_TEMP/aos-verify-result.json")
+          {
+            echo "## aos-verify"
+            echo "- Veredicto: $([ "$PASSED" = true ] && echo verde || echo rojo)"
+            echo "- Recibo: HTTP $CODE, id $(jq -r '.id // "ninguno"' "$RUNNER_TEMP/receipt.json")"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "$CODE" = 201 ] || { echo "aos-api rechazo el recibo (HTTP $CODE)"; exit 1; }
+          [ "$PASSED" = true ]
