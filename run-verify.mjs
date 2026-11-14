@@ -21,8 +21,11 @@ export function resolveDefinition({ cwd, config, env }) {
     const changed = git(['diff', '--quiet', base, 'HEAD', '--', config], cwd);
     if (changed.status === 1) {
       const shown = git(['show', `${base}:${config}`], cwd);
-      // la base sin definicion (PR que la crea) no se mide con la del PR: rojo
-      if (shown.status !== 0) return { raw: null, definitionChanged: true, error: 'la base no tiene definicion y el PR la cambia' };
+      // la base sin definicion (PR que la crea): arranque, se mide con la del PR y se marca (el check nunca sale verde)
+      if (shown.status !== 0) {
+        try { return { raw: readFileSync(path.join(cwd, config), 'utf8'), definitionChanged: true, bootstrap: true }; }
+        catch (e) { return { raw: null, definitionChanged: true, error: `no se pudo leer ${config}: ${e.code}` }; }
+      }
       return { raw: shown.stdout, definitionChanged: true };
     }
     if (changed.status !== 0) return { raw: null, definitionChanged: false, error: `git diff fallo: ${changed.stderr.trim()}` };
@@ -35,7 +38,7 @@ export function runVerify({ cwd = process.cwd(), config = 'aos/verify.json', env
   const def = resolveDefinition({ cwd, config, env });
   const sha = env.GITHUB_SHA || git(['rev-parse', 'HEAD'], cwd).stdout.trim();
   const red = (why) => ({ sha, verifyConfigDigest: sha256(def.raw ?? ''), plan: [], passed: false, notMeasured: [why],
-    commands: [], definitionChanged: def.definitionChanged });
+    commands: [], definitionChanged: def.definitionChanged, ...(def.bootstrap ? { bootstrap: true } : {}) });
   if (def.raw === null) return red(def.error);
   let cfg;
   try { cfg = JSON.parse(def.raw); } catch { return red(`${config} no es JSON valido`); }
@@ -53,7 +56,8 @@ export function runVerify({ cwd = process.cwd(), config = 'aos/verify.json', env
     return { cmd, code, passed: code === 0, durationMs: Date.now() - t0, logDigest: sha256(out) };
   });
   return { sha, verifyConfigDigest: sha256(def.raw), plan, passed: commands.length > 0 && commands.every((c) => c.passed),
-    notMeasured: commands.length === 0 ? ['commands vacio'] : [], commands, definitionChanged: def.definitionChanged };
+    notMeasured: commands.length === 0 ? ['commands vacio'] : [], commands, definitionChanged: def.definitionChanged,
+    ...(def.bootstrap ? { bootstrap: true } : {}) };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)) {
@@ -63,6 +67,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(im
   mkdirSync(path.dirname(path.resolve(out)), { recursive: true });
   writeFileSync(out, JSON.stringify(result));
   for (const c of result.commands) console.log(`${c.passed ? 'PASS' : 'FAIL'} (${c.code}) ${c.cmd}`);
-  console.log(`aos-verify: ${result.passed ? 'verde' : 'rojo'}${result.definitionChanged ? ' (definicion de la base)' : ''}`);
+  console.log(`aos-verify: ${result.passed ? 'verde' : 'rojo'}${result.bootstrap ? ' (arranque: definicion del PR)' : result.definitionChanged ? ' (definicion de la base)' : ''}`);
   process.exit(0); // el rojo se firma: el job decide su estado tras enviar el recibo
 }
